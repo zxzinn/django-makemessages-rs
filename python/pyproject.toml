@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "django-makemessages-rs"
+version = "0.1.0"
+description = "A fast Rust replacement for Django's makemessages command"
+requires-python = ">=3.9"
+
+[project.scripts]
+django-makemessages-rs = "django_makemessages_rs.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["django_makemessages_rs"]
