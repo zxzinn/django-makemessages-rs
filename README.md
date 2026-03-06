@@ -1,11 +1,16 @@
 # django-makemessages-rs
 
-A fast Rust replacement for Django's `makemessages` command. Produces byte-identical `.po` file output compared to [django-extended-makemessages](https://pypi.org/project/django-extended-makemessages/), but roughly 60-70x faster.
+[![PyPI](https://img.shields.io/pypi/v/django-makemessages-rs)](https://pypi.org/project/django-makemessages-rs/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+A fast Rust alternative to Django's `makemessages` command. Produces byte-identical `.po` file output compared to [django-extended-makemessages](https://pypi.org/project/django-extended-makemessages/).
 
 Tested against a ~2000 file Django project with ~3000 translatable strings across 5 locales:
 
-- Django `extendedmakemessages`: ~21s
-- `django-makemessages-rs`: ~0.3s
+| Tool | Time |
+|------|------|
+| `django-extended-makemessages` | ~21s |
+| `django-makemessages-rs` | ~0.3s |
 
 ## Install
 
@@ -17,13 +22,27 @@ Platform wheels are available for macOS (arm64, x86_64) and Linux (x86_64, aarch
 
 ## Usage
 
-```
+```bash
 django-makemessages-rs \
   -l en -l zh_Hant -l zh_Hans -l ko -l ja \
   --ignore .venv --ignore node_modules \
   --no-location --no-flags --sort-output \
   --no-fuzzy-matching --keep-header \
   --locale-dir locale
+```
+
+### CI check mode
+
+Use `--check` to verify translation files are in sync with source code. Exits with code 1 if any `.po` file would change:
+
+```bash
+django-makemessages-rs \
+  -l en -l zh_Hant \
+  --ignore .venv --ignore node_modules \
+  --no-location --no-flags --sort-output \
+  --no-fuzzy-matching --keep-header \
+  --locale-dir locale \
+  --check
 ```
 
 ### Options
@@ -62,7 +81,9 @@ The extractor handles:
 - Template variable substitution (`{{ var }}` to `%(var)s`)
 - Literal `%` escaping to `%%`
 
-## Pre-commit integration
+No Django settings or `DJANGO_SETTINGS_MODULE` required — runs as a standalone CLI.
+
+## Pre-commit / Git hooks integration
 
 Add to your `pyproject.toml` dev dependencies:
 
