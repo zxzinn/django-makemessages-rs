@@ -1,6 +1,6 @@
 [package]
 name = "django-makemessages-rs"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "A fast Rust replacement for Django's makemessages command"
 license = "MIT"

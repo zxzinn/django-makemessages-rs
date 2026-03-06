@@ -9,20 +9,14 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-macos:
     strategy:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            os: macos-latest
           - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
 
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +29,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --compatibility manylinux2014
+          args: --release --out dist
 
       - name: Build tarball
         run: |
@@ -49,8 +43,44 @@ jobs:
             dist/*.whl
             django-makemessages-rs-*.tar.gz
 
+  build-linux:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+
+      - name: Build tarball
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../django-makemessages-rs-${{ matrix.target }}.tar.gz django-makemessages-rs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            dist/*.whl
+            django-makemessages-rs-*.tar.gz
+
   release:
-    needs: build
+    needs: [build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -66,7 +96,7 @@ jobs:
             dist/*.whl
 
   publish:
-    needs: build
+    needs: [build-macos, build-linux]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
