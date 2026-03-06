@@ -42,6 +42,7 @@ django-makemessages-rs \
     --keep-header            Keep the existing .po file header
     --no-obsolete            Remove obsolete message strings
     --no-wrap                Don't break long message lines
+    --check                  Exit with error if .po files would change (dry-run)
     --timing                 Show timing information
 ```
 

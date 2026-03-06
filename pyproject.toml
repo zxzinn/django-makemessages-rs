@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "django-makemessages-rs"
-version = "0.1.4"
+version = "0.2.0"
 description = "A fast Rust replacement for Django's makemessages command (~60x faster)"
 requires-python = ">=3.9"
 license = { text = "MIT" }

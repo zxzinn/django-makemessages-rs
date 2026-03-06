@@ -50,6 +50,10 @@ struct Cli {
     #[arg(long)]
     keep_header: bool,
 
+    /// Exit with error if .po files would be modified (dry-run check)
+    #[arg(long)]
+    check: bool,
+
     /// Root directory to scan (default: current directory)
     #[arg(long, default_value = ".")]
     root: PathBuf,
@@ -152,6 +156,8 @@ fn main() -> Result<()> {
         keep_header: cli.keep_header,
     };
 
+    let mut changed_files = Vec::new();
+
     for locale in &cli.locales {
         let po_path = locale_dir
             .join(locale)
@@ -171,8 +177,17 @@ fn main() -> Result<()> {
             &options,
         );
 
-        po::write_po_file(&po_path, &merged)?;
-        eprintln!("  Wrote {}", po_path.display());
+        let new_content = format!("{merged}\n");
+
+        if cli.check {
+            let old = existing_content.unwrap_or_default();
+            if old != new_content {
+                changed_files.push(po_path.display().to_string());
+            }
+        } else {
+            po::write_po_file(&po_path, &merged)?;
+            eprintln!("  Wrote {}", po_path.display());
+        }
     }
 
     if cli.timing {
@@ -181,12 +196,21 @@ fn main() -> Result<()> {
 
     let elapsed = start.elapsed();
     eprintln!(
-        "Done: {} files scanned, {} strings extracted, {} locale(s) updated in {:.2}s",
+        "Done: {} files scanned, {} strings extracted, {} locale(s) {} in {:.2}s",
         file_count,
         total_strings,
         cli.locales.len(),
+        if cli.check { "checked" } else { "updated" },
         elapsed.as_secs_f64()
     );
+
+    if cli.check && !changed_files.is_empty() {
+        eprintln!("The following .po files are out of sync:");
+        for f in &changed_files {
+            eprintln!("  {f}");
+        }
+        std::process::exit(1);
+    }
 
     Ok(())
 }
