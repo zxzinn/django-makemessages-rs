@@ -66,7 +66,7 @@ The extractor handles:
 Add to your `pyproject.toml` dev dependencies:
 
 ```toml
-"django-makemessages-rs==0.1.4"
+"django-makemessages-rs"
 ```
 
 Then in your pre-commit script:
