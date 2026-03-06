@@ -41,53 +41,33 @@ jobs:
           tar czf ../../../django-makemessages-rs-${{ matrix.target }}.tar.gz django-makemessages-rs
 
       - name: Build wheel
+        shell: bash
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-
-          WHEEL_DIR="wheel_build"
           PKG="django_makemessages_rs"
+          DIST_INFO="${PKG}-${VERSION}.dist-info"
           DATA_DIR="${PKG}-${VERSION}.data"
+          WHEEL_DIR="wheel_build"
 
           mkdir -p "${WHEEL_DIR}/${PKG}"
           mkdir -p "${WHEEL_DIR}/${DATA_DIR}/scripts"
+          mkdir -p "${WHEEL_DIR}/${DIST_INFO}"
 
           cp python/django_makemessages_rs/__init__.py "${WHEEL_DIR}/${PKG}/"
           cp python/django_makemessages_rs/__main__.py "${WHEEL_DIR}/${PKG}/"
           cp "target/${{ matrix.target }}/release/django-makemessages-rs" "${WHEEL_DIR}/${DATA_DIR}/scripts/"
 
-          cat > "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/METADATA" <<PYEOF
-          Metadata-Version: 2.1
-          Name: django-makemessages-rs
-          Version: ${VERSION}
-          Summary: A fast Rust replacement for Django makemessages (~60x faster)
-          Requires-Python: >=3.9
-          PYEOF
-          # Remove leading whitespace from heredoc
-          sed -i.bak 's/^          //' "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/METADATA"
-          rm -f "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/METADATA.bak"
+          printf 'Metadata-Version: 2.1\nName: django-makemessages-rs\nVersion: %s\nSummary: A fast Rust replacement for Django makemessages (~60x faster)\nRequires-Python: >=3.9\n' "$VERSION" > "${WHEEL_DIR}/${DIST_INFO}/METADATA"
 
-          cat > "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/WHEEL" <<PYEOF
-          Wheel-Version: 1.0
-          Generator: custom
-          Root-Is-Purelib: false
-          Tag: py3-none-${{ matrix.platform_tag }}
-          PYEOF
-          sed -i.bak 's/^          //' "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/WHEEL"
-          rm -f "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/WHEEL.bak"
+          printf 'Wheel-Version: 1.0\nGenerator: custom\nRoot-Is-Purelib: false\nTag: py3-none-%s\n' "${{ matrix.platform_tag }}" > "${WHEEL_DIR}/${DIST_INFO}/WHEEL"
 
-          cat > "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/entry_points.txt" <<PYEOF
-          [console_scripts]
-          django-makemessages-rs = django_makemessages_rs.__main__:main
-          PYEOF
-          sed -i.bak 's/^          //' "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/entry_points.txt"
-          rm -f "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/entry_points.txt.bak"
+          printf '[console_scripts]\ndjango-makemessages-rs = django_makemessages_rs.__main__:main\n' > "${WHEEL_DIR}/${DIST_INFO}/entry_points.txt"
 
-          touch "${WHEEL_DIR}/${PKG}-${VERSION}.dist-info/RECORD"
+          touch "${WHEEL_DIR}/${DIST_INFO}/RECORD"
 
           WHEEL_NAME="${PKG}-${VERSION}-py3-none-${{ matrix.platform_tag }}.whl"
-          cd "${WHEEL_DIR}"
-          zip -r "../${WHEEL_NAME}" .
-          cd ..
+          cd "${WHEEL_DIR}" && zip -r "../${WHEEL_NAME}" .
 
       - uses: actions/upload-artifact@v4
         with:
@@ -104,10 +84,27 @@ jobs:
         with:
           merge-multiple: true
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
             *.tar.gz
             *.whl
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Collect wheels
+        run: mkdir dist && mv *.whl dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
