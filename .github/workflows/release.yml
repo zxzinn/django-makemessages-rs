@@ -54,15 +54,12 @@ jobs:
           mkdir -p "${WHEEL_DIR}/${DATA_DIR}/scripts"
           mkdir -p "${WHEEL_DIR}/${DIST_INFO}"
 
-          cp python/django_makemessages_rs/__init__.py "${WHEEL_DIR}/${PKG}/"
-          cp python/django_makemessages_rs/__main__.py "${WHEEL_DIR}/${PKG}/"
+          touch "${WHEEL_DIR}/${PKG}/__init__.py"
           cp "target/${{ matrix.target }}/release/django-makemessages-rs" "${WHEEL_DIR}/${DATA_DIR}/scripts/"
 
           printf 'Metadata-Version: 2.1\nName: django-makemessages-rs\nVersion: %s\nSummary: A fast Rust replacement for Django makemessages (~60x faster)\nRequires-Python: >=3.9\n' "$VERSION" > "${WHEEL_DIR}/${DIST_INFO}/METADATA"
 
           printf 'Wheel-Version: 1.0\nGenerator: custom\nRoot-Is-Purelib: false\nTag: py3-none-%s\n' "${{ matrix.platform_tag }}" > "${WHEEL_DIR}/${DIST_INFO}/WHEEL"
-
-          printf '[console_scripts]\ndjango-makemessages-rs = django_makemessages_rs.__main__:main\n' > "${WHEEL_DIR}/${DIST_INFO}/entry_points.txt"
 
           touch "${WHEEL_DIR}/${DIST_INFO}/RECORD"
 
