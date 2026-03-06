@@ -15,76 +15,39 @@ jobs:
         include:
           - target: x86_64-apple-darwin
             os: macos-latest
-            platform_tag: macosx_10_12_x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
-            platform_tag: macosx_11_0_arm64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            platform_tag: manylinux_2_17_x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            platform_tag: manylinux_2_17_aarch64
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
         with:
-          targets: ${{ matrix.target }}
+          python-version: "3.11"
 
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --compatibility manylinux2014
 
-      - name: Build
-        run: |
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-          fi
-          cargo build --release --target ${{ matrix.target }}
-
-      - name: Package tarball
+      - name: Build tarball
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../django-makemessages-rs-${{ matrix.target }}.tar.gz django-makemessages-rs
-
-      - name: Build wheel
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          PKG="django_makemessages_rs"
-          DIST_INFO="${PKG}-${VERSION}.dist-info"
-          DATA_DIR="${PKG}-${VERSION}.data"
-          WHEEL_DIR="wheel_build"
-
-          mkdir -p "${WHEEL_DIR}/${PKG}"
-          mkdir -p "${WHEEL_DIR}/${DATA_DIR}/scripts"
-          mkdir -p "${WHEEL_DIR}/${DIST_INFO}"
-
-          touch "${WHEEL_DIR}/${PKG}/__init__.py"
-          cp "target/${{ matrix.target }}/release/django-makemessages-rs" "${WHEEL_DIR}/${DATA_DIR}/scripts/"
-
-          printf 'Metadata-Version: 2.1\nName: django-makemessages-rs\nVersion: %s\nSummary: A fast Rust replacement for Django makemessages (~60x faster)\nRequires-Python: >=3.9\n' "$VERSION" > "${WHEEL_DIR}/${DIST_INFO}/METADATA"
-
-          printf 'Wheel-Version: 1.0\nGenerator: custom\nRoot-Is-Purelib: false\nTag: py3-none-%s\n' "${{ matrix.platform_tag }}" > "${WHEEL_DIR}/${DIST_INFO}/WHEEL"
-
-          touch "${WHEEL_DIR}/${DIST_INFO}/RECORD"
-
-          WHEEL_NAME="${PKG}-${VERSION}-py3-none-${{ matrix.platform_tag }}.whl"
-          cd "${WHEEL_DIR}" && zip -r "../${WHEEL_NAME}" .
 
       - uses: actions/upload-artifact@v4
         with:
           name: artifacts-${{ matrix.target }}
           path: |
-            django-makemessages-rs-${{ matrix.target }}.tar.gz
-            django_makemessages_rs-*.whl
+            dist/*.whl
+            django-makemessages-rs-*.tar.gz
 
   release:
     needs: build
@@ -100,7 +63,7 @@ jobs:
           generate_release_notes: true
           files: |
             *.tar.gz
-            *.whl
+            dist/*.whl
 
   publish:
     needs: build
@@ -113,8 +76,7 @@ jobs:
         with:
           merge-multiple: true
 
-      - name: Collect wheels
-        run: mkdir dist && mv *.whl dist/
-
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
