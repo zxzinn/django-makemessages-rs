@@ -77,9 +77,43 @@ static TEMPLATE_BLOCKTRANS_PLURAL_RE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Matches {# ... #} inline comments (single-line only, non-greedy)
+static TEMPLATE_INLINE_COMMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\{#.*?#\}"#).unwrap());
+
+/// Matches {% comment %}...{% endcomment %} block comments (multi-line)
+static TEMPLATE_COMMENT_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}"#).unwrap()
+});
+
 /// Converts Django template variables {{ var }} to Python format %(var)s
 static TEMPLATE_VAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\{\{\s*(\w+)\s*\}\}"#).unwrap());
+
+/// Replace comment regions with whitespace of the same byte length,
+/// preserving newlines so that line numbers remain accurate.
+fn strip_template_comments(content: &str) -> String {
+    let mut result = content.to_string();
+    for re in [&*TEMPLATE_COMMENT_BLOCK_RE, &*TEMPLATE_INLINE_COMMENT_RE] {
+        let current = result.clone();
+        let mut out = String::with_capacity(current.len());
+        let mut last_end = 0;
+        for m in re.find_iter(&current) {
+            out.push_str(&current[last_end..m.start()]);
+            for ch in current[m.start()..m.end()].chars() {
+                if ch == '\n' {
+                    out.push('\n');
+                } else {
+                    out.push(' ');
+                }
+            }
+            last_end = m.end();
+        }
+        out.push_str(&current[last_end..]);
+        result = out;
+    }
+    result
+}
 
 fn templatize_vars(s: &str) -> String {
     TEMPLATE_VAR_RE.replace_all(s, "%($1)s").to_string()
@@ -300,6 +334,7 @@ pub fn extract_from_python(content: &str, file_path: &Path) -> Vec<TranslationEn
 }
 
 pub fn extract_from_template(content: &str, file_path: &Path) -> Vec<TranslationEntry> {
+    let content = &strip_template_comments(content);
     let mut entries = Vec::new();
     let file_ref = file_path.to_string_lossy().to_string();
 
@@ -567,5 +602,92 @@ msg2 = gettext_lazy("File format not supported")
         let entries = extract_from_python(code, &PathBuf::from("test.py"));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].msgid, "Draft");
+    }
+
+    #[test]
+    fn test_template_inline_comment_skipped() {
+        let html = r#"{# {% trans "hidden" %} #}
+{% trans "visible" %}"#;
+        let entries = extract_from_template(html, &PathBuf::from("test.html"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].msgid, "visible");
+    }
+
+    #[test]
+    fn test_template_comment_block_skipped() {
+        let html = r#"{% comment %}
+{% trans "inside comment" %}
+{% blocktrans %}Also hidden {{ name }}{% endblocktrans %}
+{% endcomment %}
+{% trans "after comment" %}"#;
+        let entries = extract_from_template(html, &PathBuf::from("test.html"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].msgid, "after comment");
+    }
+
+    #[test]
+    fn test_template_comment_preserves_line_numbers() {
+        let html = r#"{% comment %}
+skip this
+{% endcomment %}
+{% trans "on line four" %}"#;
+        let entries = extract_from_template(html, &PathBuf::from("test.html"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].references[0], "test.html:4");
+    }
+
+    #[test]
+    fn test_template_mixed_comments_and_content() {
+        let html = r#"{% trans "first" %}
+{# {% trans "hidden inline" %} #}
+{% comment %}{% trans "hidden block" %}{% endcomment %}
+{% trans "second" %}"#;
+        let entries = extract_from_template(html, &PathBuf::from("test.html"));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].msgid, "first");
+        assert_eq!(entries[1].msgid, "second");
+    }
+
+    #[test]
+    fn test_extract_file_routes_email_to_template() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("makemessages_test_email");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("welcome.email");
+        let mut f = std::fs::File::create(&file).unwrap();
+        writeln!(f, r#"{{% load i18n %}}{{% trans "Hello from email" %}}"#).unwrap();
+        let entries = extract_file(&file).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].msgid, "Hello from email");
+    }
+
+    #[test]
+    fn test_extract_file_routes_py_to_python() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("makemessages_test_py");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("views.py");
+        let mut f = std::fs::File::create(&file).unwrap();
+        writeln!(f, r#"_('Python string')"#).unwrap();
+        let entries = extract_file(&file).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].msgid, "Python string");
+    }
+
+    #[test]
+    fn test_blocktrans_inside_comment_block_skipped() {
+        let html = r#"{% comment %}
+{% blocktrans count counter=items|length %}
+{{ counter }} item
+{% plural %}
+{{ counter }} items
+{% endblocktrans %}
+{% endcomment %}
+{% trans "visible after blocktrans comment" %}"#;
+        let entries = extract_from_template(html, &PathBuf::from("test.html"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].msgid, "visible after blocktrans comment");
     }
 }
