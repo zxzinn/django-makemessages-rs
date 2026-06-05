@@ -390,8 +390,7 @@ pub fn extract_file(file_path: &Path) -> Result<Vec<TranslationEntry>> {
 
     let entries = match ext {
         "py" => extract_from_python(&content, file_path),
-        "html" | "txt" => extract_from_template(&content, file_path),
-        _ => Vec::new(),
+        _ => extract_from_template(&content, file_path),
     };
 
     Ok(entries)
