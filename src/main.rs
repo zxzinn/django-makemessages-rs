@@ -3,10 +3,19 @@ mod po;
 mod walker;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use po::LocationMode;
 use rayon::prelude::*;
 use std::path::PathBuf;
 use std::time::Instant;
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+enum AddLocation {
+    Full,
+    File,
+    Never,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -22,9 +31,13 @@ struct Cli {
     #[arg(short = 'i', long = "ignore")]
     ignore_patterns: Vec<String>,
 
-    /// Don't write '#: filename:line' lines
-    #[arg(long)]
+    /// Don't write '#: filename:line' lines (shorthand for --add-location never)
+    #[arg(long, conflicts_with = "add_location")]
     no_location: bool,
+
+    /// Controls '#:' location comments: full (default), file, or never
+    #[arg(long, value_enum)]
+    add_location: Option<AddLocation>,
 
     /// Remove obsolete message strings
     #[arg(long)]
@@ -146,8 +159,18 @@ fn main() -> Result<()> {
     eprintln!("Generating PO files for {} locale(s)...", cli.locales.len());
     let po_start = Instant::now();
 
+    let location_mode = if cli.no_location {
+        LocationMode::Never
+    } else {
+        match cli.add_location {
+            Some(AddLocation::Full) | None => LocationMode::Full,
+            Some(AddLocation::File) => LocationMode::File,
+            Some(AddLocation::Never) => LocationMode::Never,
+        }
+    };
+
     let options = po::PoFileOptions {
-        no_location: cli.no_location,
+        location_mode,
         no_obsolete: cli.no_obsolete,
         no_wrap: cli.no_wrap,
         sort_output: cli.sort_output,

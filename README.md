@@ -54,7 +54,8 @@ django-makemessages-rs \
 -e, --extension <EXTS>       File extensions to examine [default: html txt py]
     --root <PATH>            Root directory to scan [default: .]
     --locale-dir <PATH>      Locale directory [default: locale]
-    --no-location            Don't write #: filename:line lines
+    --no-location            Don't write #: filename:line lines (shorthand for --add-location never)
+    --add-location <MODE>    Controls #: location comments: full (default), file, or never
     --no-flags               Don't write #, flags lines
     --sort-output            Generate sorted output
     --no-fuzzy-matching      Do not use fuzzy matching
