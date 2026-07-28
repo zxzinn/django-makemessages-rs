@@ -10,6 +10,14 @@ static PO_HEADER_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?ms)^msgid\s+""\nmsgstr\s+"[^"]*"(?:\n\s*"[^"]*")*"#).unwrap()
 });
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LocationMode {
+    #[default]
+    Full,
+    File,
+    Never,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PoEntry {
     comments: Vec<String>,
@@ -221,15 +229,22 @@ pub(crate) fn parse_po_file(content: &str) -> IndexMap<String, PoEntry> {
     entries
 }
 
-fn format_entry(entry: &PoEntry, no_location: bool, no_flags: bool, sort_output: bool, no_wrap: bool) -> String {
+fn format_entry(entry: &PoEntry, location_mode: LocationMode, no_flags: bool, sort_output: bool, no_wrap: bool) -> String {
     let mut lines = Vec::new();
 
     for comment in &entry.comments {
         lines.push(comment.clone());
     }
 
-    if !no_location && !entry.references.is_empty() {
+    if location_mode != LocationMode::Never && !entry.references.is_empty() {
         let mut refs = entry.references.clone();
+        if location_mode == LocationMode::File {
+            refs = refs
+                .iter()
+                .map(|r| r.rsplit_once(':').map_or(r.as_str(), |(file, _)| file).to_string())
+                .collect();
+            refs.dedup();
+        }
         if sort_output {
             refs.sort();
         }
@@ -273,7 +288,7 @@ fn format_entry(entry: &PoEntry, no_location: bool, no_flags: bool, sort_output:
 }
 
 pub struct PoFileOptions {
-    pub no_location: bool,
+    pub location_mode: LocationMode,
     #[allow(dead_code)]
     pub no_obsolete: bool,
     pub no_wrap: bool,
@@ -358,7 +373,7 @@ pub fn merge_entries(
     output.push_str("\n\n");
 
     for (_, entry) in &new_entries {
-        output.push_str(&format_entry(entry, options.no_location, options.no_flags, options.sort_output, options.no_wrap));
+        output.push_str(&format_entry(entry, options.location_mode, options.no_flags, options.sort_output, options.no_wrap));
         output.push_str("\n\n");
     }
 
@@ -433,7 +448,7 @@ msgstr "你好"
             references: vec!["new.py:5".to_string()],
         }];
         let options = PoFileOptions {
-            no_location: false,
+            location_mode: LocationMode::Full,
             no_obsolete: true,
             no_wrap: true,
             sort_output: true,
@@ -467,7 +482,7 @@ msgstr "你好"
     #[test]
     fn test_wrap_references_short_fits_one_line() {
         let entry = make_entry(vec!["a.py:1", "b.py:2"]);
-        let out = format_entry(&entry, false, false, false, false);
+        let out = format_entry(&entry, LocationMode::Full, false, false, false);
         let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
         assert_eq!(ref_lines, vec!["#: a.py:1 b.py:2"]);
     }
@@ -482,7 +497,7 @@ msgstr "你好"
             "aaaa.py:5", "aaaa.py:6", "aaaa.py:7", "aaaa.py:8",
         ];
         let entry = make_entry(refs);
-        let out = format_entry(&entry, false, false, false, false);
+        let out = format_entry(&entry, LocationMode::Full, false, false, false);
         let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
         assert_eq!(ref_lines.len(), 2);
         for l in &ref_lines {
@@ -501,7 +516,7 @@ msgstr "你好"
         let long_ref = format!("a/{}.py:1", "x".repeat(70));
         assert_eq!(long_ref.len(), 77);
         let entry = make_entry(vec!["a.py:1", &long_ref]);
-        let out = format_entry(&entry, false, false, false, false);
+        let out = format_entry(&entry, LocationMode::Full, false, false, false);
         let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
         assert_eq!(ref_lines.len(), 2);
         assert_eq!(ref_lines[0], "#: a.py:1");
@@ -515,9 +530,24 @@ msgstr "你好"
             "aaaa.py:5", "aaaa.py:6", "aaaa.py:7", "aaaa.py:8",
         ];
         let entry = make_entry(refs);
-        let out = format_entry(&entry, false, false, false, true);
+        let out = format_entry(&entry, LocationMode::Full, false, false, true);
         let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
         assert_eq!(ref_lines.len(), 1);
         assert!(ref_lines[0].len() > 80);
+    }
+
+    #[test]
+    fn test_location_mode_file_strips_line_numbers_and_dedups() {
+        let entry = make_entry(vec!["a.py:1", "a.py:2", "b.py:3"]);
+        let out = format_entry(&entry, LocationMode::File, false, false, true);
+        let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
+        assert_eq!(ref_lines, vec!["#: a.py b.py"]);
+    }
+
+    #[test]
+    fn test_location_mode_never_omits_location_line() {
+        let entry = make_entry(vec!["a.py:1"]);
+        let out = format_entry(&entry, LocationMode::Never, false, false, true);
+        assert!(!out.lines().any(|l| l.starts_with("#:")));
     }
 }
