@@ -1,0 +1,6 @@
+{% load i18n %}
+{% blocktrans %}Hi {{ user.name }} you have {{ count|add:1 }} left{% endblocktrans %}
+{% blocktrans %}Plain {{ name }} here{% endblocktrans %}
+{% blocktrans trimmed %}
+  Trimmed {{ a.b.c }} text
+{% endblocktrans %}

@@ -51,7 +51,7 @@ django-makemessages-rs \
 -l, --locale <LOCALES>       Locales to generate (required, repeatable)
 -i, --ignore <PATTERNS>      Patterns to ignore (directories/files)
 -d, --domain <DOMAIN>        Domain name [default: django]
--e, --extension <EXTS>       File extensions to examine [default: html txt py]
+-e, --extension <EXTS>       File extensions to examine [default: html txt py, or js for djangojs]
     --root <PATH>            Root directory to scan [default: .]
     --locale-dir <PATH>      Locale directory [default: locale]
     --no-location            Don't write #: filename:line lines (shorthand for --add-location never)
@@ -76,11 +76,22 @@ django-makemessages-rs \
 The extractor handles:
 - Python `gettext()`, `ngettext()`, `pgettext()`, `npgettext()` and the `_()` alias
 - Django template tags: `{% trans %}`, `{% translate %}`, `{% blocktrans %}`, `{% blocktranslate %}`
+- `context "..."` on both `{% translate %}` and `{% blocktranslate %}`, emitted as `msgctxt`
 - `{% blocktrans trimmed %}` whitespace collapsing
 - `{% blocktrans %}...{% plural %}...{% endblocktrans %}` plural forms
-- Python implicit string concatenation (`_("foo" "bar")`)
-- Template variable substitution (`{{ var }}` to `%(var)s`)
+- `_("...")` constants in block tags, variable expressions and filter arguments
+  (`{{ foo|default:_("bar") }}`)
+- `Translators:` comments, from `#` in Python and `{# ... #}` / `{% comment %}`
+  in templates, written out as `#.` lines
+- Python implicit string concatenation (`_("foo" "bar")`) and triple-quoted strings
+- Template variable substitution, including filters and dotted lookups
+  (`{{ user.name|upper }}` to `%(user.name|upper)s`)
 - Literal `%` escaping to `%%`
+- JavaScript sources under `--domain djangojs`
+
+Entries that disappear from the source are kept as `#~` obsolete blocks so
+existing translations survive, matching gettext. Pass `--no-obsolete` to drop
+them instead.
 
 No Django settings or `DJANGO_SETTINGS_MODULE` required — runs as a standalone CLI.
 
@@ -102,6 +113,27 @@ uv run django-makemessages-rs \
   --no-fuzzy-matching --keep-header \
   --locale-dir locale
 ```
+
+## Testing
+
+```bash
+cargo test --release
+```
+
+There is also a differential suite that runs the real Django `makemessages`
+over the same fixtures and compares the extracted messages, so behavioral
+drift from Django gets caught:
+
+```bash
+python3 -m venv tests/differential/.venv
+tests/differential/.venv/bin/pip install django
+cargo build --release
+./tests/differential/run.sh
+```
+
+It needs GNU gettext (`xgettext`, `msgmerge`, `msguniq`, `msgattrib`) on PATH.
+Headers and `#:` locations are excluded from the comparison; everything else
+(msgid, msgid_plural, msgctxt, `#.` comments, ordering) must match exactly.
 
 ## License
 
