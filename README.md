@@ -56,6 +56,11 @@ django-makemessages-rs \
     --no-default-ignore      Don't ignore CVS, .*, *~, *.pyc
 -d, --domain <DOMAIN>        Domain name: django or djangojs [default: django]
 -e, --extension <EXTS>       File extensions to examine [default: html txt py, or js for djangojs]
+-k, --keyword <SPEC>         Extra xgettext keywordspec, e.g. -k t or -k t:1c,2
+                             (repeatable; -k '' drops the defaults)
+    --add-comments [TAG]     Emit preceding comments as #. lines
+                             [default tag: Translators; bare = all comments]
+    --detect-aliases         Treat `import gettext as x` aliases as keywords
     --root <PATH>            Root directory to scan [default: .]
     --locale-dir <PATH>      Locale directory [default: locale]
     --locale-path <PATH>     Extra locale directories, like LOCALE_PATHS (repeatable)
@@ -94,6 +99,12 @@ The extractor handles:
   (`{{ user.name|upper }}` to `%(user.name|upper)s`)
 - Literal `%` escaping to `%%`
 - JavaScript sources under `--domain djangojs`
+- custom translation functions via `--keyword`, using xgettext's keywordspec
+  syntax (`name`, `name:2`, `name:1c,2`, `name:1,2`)
+
+Only arguments that are *entirely* string literals are extracted, matching
+xgettext: `_(getattr(obj, 'verbose_name', label))` yields nothing, while
+`_("a" "b")` yields `ab`.
 
 Entries that disappear from the source are kept as `#~` obsolete blocks so
 existing translations survive, matching gettext. Pass `--no-obsolete` to drop
@@ -151,12 +162,14 @@ drift from Django gets caught:
 
 ```bash
 python3 -m venv tests/differential/.venv
-tests/differential/.venv/bin/pip install django
+tests/differential/.venv/bin/pip install django django-extended-makemessages
 cargo build --release
 ./tests/differential/run.sh
 ```
 
-It needs GNU gettext (`xgettext`, `msgmerge`, `msguniq`, `msgattrib`) on PATH.
+It needs GNU gettext (`xgettext`, `msgmerge`, `msguniq`, `msgattrib`) on PATH,
+plus `django-extended-makemessages` for the fixtures covering `--keyword`,
+`--add-comments` and `--detect-aliases`.
 Headers and `#:` locations are excluded from the comparison; everything else
 (msgid, msgid_plural, msgctxt, `#.` comments, ordering) must match exactly.
 

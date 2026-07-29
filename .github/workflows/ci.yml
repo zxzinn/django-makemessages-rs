@@ -28,7 +28,8 @@ jobs:
       - name: Install Django
         run: |
           python -m venv tests/differential/.venv
-          tests/differential/.venv/bin/pip install --quiet 'django>=5.0'
+          tests/differential/.venv/bin/pip install --quiet \
+            'django>=5.0' django-extended-makemessages
 
       - name: Check formatting
         run: cargo fmt --check

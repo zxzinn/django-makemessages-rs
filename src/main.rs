@@ -1,4 +1,5 @@
 mod extractor;
+mod keywords;
 mod plural_forms;
 mod po;
 mod walker;
@@ -100,6 +101,21 @@ struct Cli {
     /// Write messages into each app's own locale/ dir, like Django does
     #[arg(long)]
     per_app_locale: bool,
+
+    /// Additional xgettext keywordspec, e.g. -k mytrans or -k mytrans:1c,2.
+    /// Pass an empty value (-k '') to drop the default keywords.
+    #[arg(short = 'k', long = "keyword")]
+    keywords: Vec<String>,
+
+    /// Emit preceding comments as '#.' lines. Bare: all comments; with a TAG,
+    /// only comments starting with it [default tag: Translators]
+    #[arg(long = "add-comments", value_name = "TAG", num_args = 0..=1, default_missing_value = "")]
+    add_comments: Option<Vec<String>>,
+
+    /// Detect `from django.utils.translation import x as y` aliases and treat
+    /// them as keywords
+    #[arg(long)]
+    detect_aliases: bool,
 
     /// Domain name (default: django)
     #[arg(short = 'd', long, default_value = "django")]
@@ -274,6 +290,33 @@ fn main() -> Result<()> {
         eprintln!("  Found {} files in {:?}", file_count, file_start.elapsed());
     }
 
+    // An explicit empty -k drops the defaults, matching xgettext's bare
+    // --keyword; anything else is added on top of them.
+    let drop_defaults = cli.keywords.iter().any(|k| k.is_empty());
+    let mut keyword_specs: Vec<keywords::Keyword> = if drop_defaults {
+        Vec::new()
+    } else {
+        keywords::default_keywords(cli.domain == "djangojs")
+    };
+    for spec in cli.keywords.iter().filter(|s| !s.is_empty()) {
+        match keywords::Keyword::parse(spec) {
+            Some(k) => keyword_specs.push(k),
+            None => anyhow::bail!("invalid keyword spec: {spec}"),
+        }
+    }
+
+    let comment_tags = match &cli.add_comments {
+        None => vec!["Translators".to_string()],
+        Some(tags) if tags.is_empty() => vec![String::new()],
+        Some(tags) => tags.clone(),
+    };
+
+    let extract_options = extractor::ExtractOptions {
+        keywords: keyword_specs,
+        comment_tags,
+        detect_aliases: cli.detect_aliases,
+    };
+
     eprintln!("Extracting translation strings...");
     let extract_start = Instant::now();
 
@@ -281,7 +324,7 @@ fn main() -> Result<()> {
         .par_iter()
         .filter_map(|file| {
             let rel_path = file.path.strip_prefix(&root).unwrap_or(&file.path);
-            match extractor::extract_file(&file.path) {
+            match extractor::extract_file_with(&file.path, &extract_options) {
                 Ok(mut entries) => {
                     for entry in &mut entries {
                         entry.references = entry

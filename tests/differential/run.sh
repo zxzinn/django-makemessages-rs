@@ -30,6 +30,14 @@ if ! "$PYTHON" -c "import django" 2>/dev/null; then
     echo "hint:  python3 -m venv $HERE/.venv && $HERE/.venv/bin/pip install django" >&2
     exit 2
 fi
+# Fixtures with a dj_command need django-extended-makemessages; without it the
+# reference side would silently produce nothing and every diff would "pass".
+if ls "$FIXTURES"/*/dj_command >/dev/null 2>&1 &&
+   ! "$PYTHON" -c "import django_extended_makemessages" 2>/dev/null; then
+    echo "error: django-extended-makemessages not importable via $PYTHON" >&2
+    echo "hint:  $PYTHON -m pip install django-extended-makemessages" >&2
+    exit 2
+fi
 for prog in xgettext msgmerge msguniq msgattrib; do
     command -v "$prog" >/dev/null || { echo "error: $prog not found (install gettext)" >&2; exit 2; }
 done
@@ -53,6 +61,10 @@ for name in "${names[@]}"; do
     [ -f "$fixture/domain" ] && domain=$(cat "$fixture/domain")
     rs_extra=""
     [ -f "$fixture/options" ] && rs_extra=$(cat "$fixture/options")
+    # `dj_options` carries the equivalent flags for the reference command, used
+    # where a feature exists on both sides but is spelled differently.
+    dj_extra=""
+    [ -f "$fixture/dj_options" ] && dj_extra=$(cat "$fixture/dj_options")
 
     work=$(mktemp -d)
 
@@ -63,8 +75,14 @@ for name in "${names[@]}"; do
     cp "$HERE/settings.py" "$HERE/manage.py" "$work/dj"/
     mkdir -p "$work/dj/locale" "$work/rs/locale"
 
-    (cd "$work/dj" && DJANGO_SETTINGS_MODULE=settings "$PYTHON" manage.py makemessages \
-        -d "$domain" -l en --no-obsolete -i settings.py -i manage.py) >/dev/null 2>&1
+    # Fixtures needing flags Django itself lacks (--keyword, --add-comments)
+    # run against django-extended-makemessages instead.
+    dj_command=makemessages
+    [ -f "$fixture/dj_command" ] && dj_command=$(cat "$fixture/dj_command")
+
+    # shellcheck disable=SC2086
+    (cd "$work/dj" && DJANGO_SETTINGS_MODULE=settings "$PYTHON" manage.py "$dj_command" \
+        -d "$domain" -l en --no-obsolete -i settings.py -i manage.py $dj_extra) >/dev/null 2>&1
     # shellcheck disable=SC2086
     (cd "$work/rs" && "$RS_BIN" -d "$domain" -l en --locale-dir locale $rs_extra) >/dev/null 2>&1
 
