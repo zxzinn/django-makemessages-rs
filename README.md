@@ -48,12 +48,18 @@ django-makemessages-rs \
 ### Options
 
 ```
--l, --locale <LOCALES>       Locales to generate (required, repeatable)
+-l, --locale <LOCALES>       Locales to generate (repeatable)
+-x, --exclude <LOCALES>      Locales to exclude (repeatable)
+-a, --all                    Update all existing locales
+-s, --symlinks               Follow symlinks to directories when scanning
 -i, --ignore <PATTERNS>      Patterns to ignore (directories/files)
--d, --domain <DOMAIN>        Domain name [default: django]
+    --no-default-ignore      Don't ignore CVS, .*, *~, *.pyc
+-d, --domain <DOMAIN>        Domain name: django or djangojs [default: django]
 -e, --extension <EXTS>       File extensions to examine [default: html txt py, or js for djangojs]
     --root <PATH>            Root directory to scan [default: .]
     --locale-dir <PATH>      Locale directory [default: locale]
+    --locale-path <PATH>     Extra locale directories, like LOCALE_PATHS (repeatable)
+    --per-app-locale         Write into each app's own locale/ dir, like Django
     --no-location            Don't write #: filename:line lines (shorthand for --add-location never)
     --add-location <MODE>    Controls #: location comments: full (default), file, or never
     --no-flags               Don't write #, flags lines
@@ -92,6 +98,25 @@ The extractor handles:
 Entries that disappear from the source are kept as `#~` obsolete blocks so
 existing translations survive, matching gettext. Pass `--no-obsolete` to drop
 them instead.
+
+New `.po` files get the correct `Plural-Forms` for their locale, taken from a
+table generated out of Django's own shipped catalogs (98 locales; `ja`, `ko`
+and `zh_*` are `nplurals=1`, Russian and Polish get their 4-form rules, and so
+on). Unknown locales fall back to the base language, then to
+`nplurals=2; plural=(n != 1);`.
+
+### Per-app locale directories
+
+By default everything is written to a single `--locale-dir`. Pass
+`--per-app-locale` to follow Django's layout instead: any directory named
+`locale/` is treated as a locale root for the app containing it, and each
+file's messages go to the nearest enclosing one.
+
+```
+appA/locale/en/LC_MESSAGES/django.po   <- strings from appA/
+appB/locale/en/LC_MESSAGES/django.po   <- strings from appB/
+locale/en/LC_MESSAGES/django.po        <- everything else
+```
 
 No Django settings or `DJANGO_SETTINGS_MODULE` required — runs as a standalone CLI.
 
