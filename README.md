@@ -45,6 +45,26 @@ django-makemessages-rs \
   --check
 ```
 
+Add `--no-untranslated` to also fail when a message has an empty `msgstr`,
+which catches strings that were extracted but never translated:
+
+```bash
+django-makemessages-rs -l en -l zh_Hant --locale-dir locale \
+  --check --no-untranslated
+```
+
+`--dry-run` computes everything and reports, but never touches the tree.
+
+### Compiling to .mo
+
+`--compile` runs `msgfmt --check-format` over each `.po` it wrote, the same
+way Django's `compilemessages` does, so a single invocation can refresh and
+compile the catalogs:
+
+```bash
+django-makemessages-rs -l en -l zh_Hant --locale-dir locale --compile
+```
+
 ### Options
 
 ```
@@ -74,6 +94,12 @@ django-makemessages-rs \
     --no-obsolete            Remove obsolete message strings
     --no-wrap                Don't break long message lines
     --check                  Exit with error if .po files would change (dry-run)
+    --dry-run                Compute everything but leave the tree untouched
+    --no-untranslated        Exit with error if any message is untranslated
+    --compile                Also compile .po to .mo afterwards (needs msgfmt)
+    --width <WIDTH>          Wrap at this column instead of 80 (0 disables)
+    --force-po               Write the .po even when it holds no messages
+    --no-flag <FLAG>         Remove only this flag from '#,' lines (repeatable)
     --timing                 Show timing information
 ```
 

@@ -274,13 +274,15 @@ pub(crate) fn parse_po_file(content: &str) -> IndexMap<String, PoEntry> {
     entries
 }
 
-fn format_entry(
-    entry: &PoEntry,
-    location_mode: LocationMode,
-    no_flags: bool,
-    sort_output: bool,
-    no_wrap: bool,
-) -> String {
+fn format_entry(entry: &PoEntry, options: &PoFileOptions) -> String {
+    let PoFileOptions {
+        location_mode,
+        no_flags,
+        sort_output,
+        no_wrap,
+        ..
+    } = *options;
+    let wrap_at = options.width.unwrap_or(80);
     let mut lines = Vec::new();
 
     for comment in &entry.comments {
@@ -303,12 +305,13 @@ fn format_entry(
         if sort_output {
             refs.sort();
         }
-        if no_wrap {
+        // gettext treats --width=0 as "never wrap", same as --no-wrap.
+        if no_wrap || wrap_at == 0 {
             lines.push(format!("#: {}", refs.join(" ")));
         } else {
             let mut line = String::from("#:");
             for r in &refs {
-                if line.len() > 2 && line.len() + 1 + r.len() >= 80 {
+                if line.len() > 2 && line.len() + 1 + r.len() >= wrap_at {
                     lines.push(line);
                     line = String::from("#:");
                 }
@@ -319,8 +322,20 @@ fn format_entry(
         }
     }
 
-    if !no_flags && !entry.flags.is_empty() {
-        lines.push(format!("#, {}", entry.flags.join(", ")));
+    if !no_flags {
+        let kept: Vec<&String> = entry
+            .flags
+            .iter()
+            .filter(|f| !options.no_flag.contains(f))
+            .collect();
+        if !kept.is_empty() {
+            let joined = kept
+                .iter()
+                .map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("#, {joined}"));
+        }
     }
 
     if let Some(ctx) = &entry.msgctxt {
@@ -361,6 +376,10 @@ pub struct PoFileOptions {
     pub no_fuzzy_matching: bool,
     pub no_flags: bool,
     pub keep_header: bool,
+    /// Individual flags to strip from `#,` lines (`--no-flag`).
+    pub no_flag: Vec<String>,
+    /// Column to wrap at; `None` uses gettext's default of 80.
+    pub width: Option<usize>,
 }
 
 fn extracted_comments(entry: &TranslationEntry) -> Vec<String> {
@@ -474,24 +493,12 @@ pub fn merge_entries(
     output.push_str("\n\n");
 
     for (_, entry) in &new_entries {
-        output.push_str(&format_entry(
-            entry,
-            options.location_mode,
-            options.no_flags,
-            options.sort_output,
-            options.no_wrap,
-        ));
+        output.push_str(&format_entry(entry, options));
         output.push_str("\n\n");
     }
 
     for entry in &obsolete_entries {
-        output.push_str(&format_entry(
-            entry,
-            options.location_mode,
-            options.no_flags,
-            options.sort_output,
-            options.no_wrap,
-        ));
+        output.push_str(&format_entry(entry, options));
         output.push_str("\n\n");
     }
 
@@ -555,6 +562,52 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32) {
     (y, m, d, (rem / 3600) as u32, (rem % 3600 / 60) as u32)
 }
 
+/// `line: msgstr[n] for msgid '...'` for each empty msgstr, skipping the
+/// header entry and obsolete blocks. Mirrors the reporting shape of
+/// django-extended-makemessages' --no-untranslated.
+pub fn untranslated_messages(content: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::new();
+    let mut current_msgid: Option<String> = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if t.starts_with("#~") {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("msgid ") {
+            current_msgid = Some(parse_po_string(rest));
+            continue;
+        }
+        if !(t.starts_with("msgstr ") || t.starts_with("msgstr[")) {
+            continue;
+        }
+        let value = match t.split_once('"') {
+            Some((_, rest)) => rest.strip_suffix('"').unwrap_or(rest),
+            None => continue,
+        };
+        if !value.is_empty() {
+            continue;
+        }
+        // `msgstr ""` followed by quoted continuation lines is a wrapped
+        // translation, not an empty one.
+        if lines
+            .get(idx + 1)
+            .is_some_and(|n| n.trim_start().starts_with('"'))
+        {
+            continue;
+        }
+        // The header entry has an empty msgid and is never a message.
+        let msgid = current_msgid.clone().unwrap_or_default();
+        if msgid.is_empty() {
+            continue;
+        }
+        let key = t.split_whitespace().next().unwrap_or("msgstr");
+        out.push(format!("{}: {key} for msgid {msgid:?}", idx + 1));
+    }
+    out
+}
+
 pub fn write_po_file(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -613,6 +666,8 @@ msgstr "你好"
             no_fuzzy_matching: true,
             no_flags: false,
             keep_header: true,
+            no_flag: Vec::new(),
+            width: None,
         };
         let result = merge_entries(&extracted, Some(existing), "zh_Hant", &options);
         assert!(result.contains("你好"));
@@ -623,6 +678,25 @@ msgstr "你好"
     #[test]
     fn test_format_po_string_simple() {
         assert_eq!(format_po_string("msgid", "Hello"), r#"msgid "Hello""#);
+    }
+
+    fn test_opts(
+        location_mode: LocationMode,
+        no_flags: bool,
+        sort_output: bool,
+        no_wrap: bool,
+    ) -> PoFileOptions {
+        PoFileOptions {
+            location_mode,
+            no_flags,
+            sort_output,
+            no_wrap,
+            no_obsolete: false,
+            no_fuzzy_matching: false,
+            keep_header: false,
+            no_flag: Vec::new(),
+            width: None,
+        }
     }
 
     fn make_entry(refs: Vec<&str>) -> PoEntry {
@@ -641,7 +715,7 @@ msgstr "你好"
     #[test]
     fn test_wrap_references_short_fits_one_line() {
         let entry = make_entry(vec!["a.py:1", "b.py:2"]);
-        let out = format_entry(&entry, LocationMode::Full, false, false, false);
+        let out = format_entry(&entry, &test_opts(LocationMode::Full, false, false, false));
         let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
         assert_eq!(ref_lines, vec!["#: a.py:1 b.py:2"]);
     }
@@ -662,7 +736,7 @@ msgstr "你好"
             "aaaa.py:8",
         ];
         let entry = make_entry(refs);
-        let out = format_entry(&entry, LocationMode::Full, false, false, false);
+        let out = format_entry(&entry, &test_opts(LocationMode::Full, false, false, false));
         let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
         assert_eq!(ref_lines.len(), 2);
         for l in &ref_lines {
@@ -681,7 +755,7 @@ msgstr "你好"
         let long_ref = format!("a/{}.py:1", "x".repeat(70));
         assert_eq!(long_ref.len(), 77);
         let entry = make_entry(vec!["a.py:1", &long_ref]);
-        let out = format_entry(&entry, LocationMode::Full, false, false, false);
+        let out = format_entry(&entry, &test_opts(LocationMode::Full, false, false, false));
         let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
         assert_eq!(ref_lines.len(), 2);
         assert_eq!(ref_lines[0], "#: a.py:1");
@@ -701,7 +775,7 @@ msgstr "你好"
             "aaaa.py:8",
         ];
         let entry = make_entry(refs);
-        let out = format_entry(&entry, LocationMode::Full, false, false, true);
+        let out = format_entry(&entry, &test_opts(LocationMode::Full, false, false, true));
         let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
         assert_eq!(ref_lines.len(), 1);
         assert!(ref_lines[0].len() > 80);
@@ -710,7 +784,7 @@ msgstr "你好"
     #[test]
     fn test_location_mode_file_strips_line_numbers_and_dedups() {
         let entry = make_entry(vec!["a.py:1", "a.py:2", "b.py:3"]);
-        let out = format_entry(&entry, LocationMode::File, false, false, true);
+        let out = format_entry(&entry, &test_opts(LocationMode::File, false, false, true));
         let ref_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("#:")).collect();
         assert_eq!(ref_lines, vec!["#: a.py b.py"]);
     }
@@ -718,7 +792,7 @@ msgstr "你好"
     #[test]
     fn test_location_mode_never_omits_location_line() {
         let entry = make_entry(vec!["a.py:1"]);
-        let out = format_entry(&entry, LocationMode::Never, false, false, true);
+        let out = format_entry(&entry, &test_opts(LocationMode::Never, false, false, true));
         assert!(!out.lines().any(|l| l.starts_with("#:")));
     }
 
@@ -731,6 +805,8 @@ msgstr "你好"
             no_fuzzy_matching: true,
             no_flags: false,
             keep_header: true,
+            no_flag: Vec::new(),
+            width: None,
         }
     }
 
@@ -805,5 +881,110 @@ msgstr "precious translation"
         e.comments = vec!["Translators: a hint".to_string()];
         let out = merge_entries(&[e], None, "en", &opts(false));
         assert!(out.contains("#. Translators: a hint"), "{out}");
+    }
+
+    const WITH_UNTRANSLATED: &str = r#"msgid ""
+msgstr ""
+"Language: en\n"
+
+msgid "done"
+msgstr "translated"
+
+msgid "todo"
+msgstr ""
+
+msgid "wrapped"
+msgstr ""
+"continued here"
+
+#~ msgid "obsolete"
+#~ msgstr ""
+"#;
+
+    #[test]
+    fn test_untranslated_finds_only_empty_msgstr() {
+        let found = untranslated_messages(WITH_UNTRANSLATED);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("\"todo\""), "{found:?}");
+    }
+
+    #[test]
+    fn test_untranslated_skips_header() {
+        assert!(!untranslated_messages(WITH_UNTRANSLATED)
+            .iter()
+            .any(|m| m.contains("msgid \"\"")));
+    }
+
+    #[test]
+    fn test_untranslated_skips_wrapped_translation() {
+        assert!(!untranslated_messages(WITH_UNTRANSLATED)
+            .iter()
+            .any(|m| m.contains("wrapped")));
+    }
+
+    #[test]
+    fn test_untranslated_skips_obsolete() {
+        assert!(!untranslated_messages(WITH_UNTRANSLATED)
+            .iter()
+            .any(|m| m.contains("obsolete")));
+    }
+
+    #[test]
+    fn test_untranslated_reports_plural_index() {
+        let po = "msgid \"\"\nmsgstr \"\"\n\nmsgid \"a\"\nmsgid_plural \"b\"\nmsgstr[0] \"x\"\nmsgstr[1] \"\"\n";
+        let found = untranslated_messages(po);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("msgstr[1]"), "{found:?}");
+    }
+
+    #[test]
+    fn test_no_flag_removes_only_named_flag() {
+        let mut entry = make_entry(vec!["a.py:1"]);
+        entry.flags = vec!["python-format".into(), "fuzzy".into()];
+        let mut o = test_opts(LocationMode::Never, false, false, true);
+        o.no_flag = vec!["python-format".into()];
+        let out = format_entry(&entry, &o);
+        assert!(out.contains("#, fuzzy"), "{out}");
+        assert!(!out.contains("python-format"), "{out}");
+    }
+
+    #[test]
+    fn test_no_flag_drops_line_when_all_removed() {
+        let mut entry = make_entry(vec!["a.py:1"]);
+        entry.flags = vec!["fuzzy".into()];
+        let mut o = test_opts(LocationMode::Never, false, false, true);
+        o.no_flag = vec!["fuzzy".into()];
+        assert!(!format_entry(&entry, &o).contains("#,"));
+    }
+
+    #[test]
+    fn test_width_zero_never_wraps() {
+        let refs: Vec<String> = (1..=12).map(|i| format!("a.py:{i}")).collect();
+        let entry = make_entry(refs.iter().map(|s| s.as_str()).collect());
+        let mut o = test_opts(LocationMode::Full, false, false, false);
+        o.width = Some(0);
+        let n = format_entry(&entry, &o)
+            .lines()
+            .filter(|l| l.starts_with("#:"))
+            .count();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn test_custom_width_wraps_earlier_than_default() {
+        let refs: Vec<String> = (1..=12).map(|i| format!("a.py:{i}")).collect();
+        let entry = make_entry(refs.iter().map(|s| s.as_str()).collect());
+        let count = |w: Option<usize>| {
+            let mut o = test_opts(LocationMode::Full, false, false, false);
+            o.width = w;
+            format_entry(&entry, &o)
+                .lines()
+                .filter(|l| l.starts_with("#:"))
+                .count()
+        };
+        assert!(
+            count(Some(40)) > count(None),
+            "narrower width must wrap more"
+        );
     }
 }
