@@ -86,6 +86,30 @@ struct Cli {
     #[arg(long)]
     check: bool,
 
+    /// Restore .po files after writing, leaving the tree untouched
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Exit with error if any message is left untranslated
+    #[arg(long)]
+    no_untranslated: bool,
+
+    /// Compile the .po files to .mo afterwards (requires msgfmt)
+    #[arg(long)]
+    compile: bool,
+
+    /// Wrap output at this width instead of 80 (0 disables wrapping)
+    #[arg(long, value_name = "WIDTH")]
+    width: Option<usize>,
+
+    /// Always write the .po file even when it contains no messages
+    #[arg(long)]
+    force_po: bool,
+
+    /// Remove only this flag from '#,' lines (repeatable)
+    #[arg(long = "no-flag", value_name = "FLAG")]
+    no_flag: Vec<String>,
+
     /// Root directory to scan (default: current directory)
     #[arg(long, default_value = ".")]
     root: PathBuf,
@@ -389,9 +413,13 @@ fn main() -> Result<()> {
         no_fuzzy_matching: cli.no_fuzzy_matching,
         no_flags: cli.no_flags,
         keep_header: cli.keep_header,
+        no_flag: cli.no_flag.clone(),
+        width: cli.width,
     };
 
     let mut changed_files = Vec::new();
+    let mut written: Vec<PathBuf> = Vec::new();
+    let mut untranslated: Vec<String> = Vec::new();
 
     for (dir, entries) in &by_locale_dir {
         for locale in &locales {
@@ -410,13 +438,28 @@ fn main() -> Result<()> {
 
             let new_content = format!("{merged}\n");
 
+            // gettext omits a catalog with no messages unless --force-po.
+            let has_messages = !entries.is_empty();
+            if !has_messages && !cli.force_po && !po_path.exists() {
+                continue;
+            }
+
+            if cli.no_untranslated {
+                for msg in po::untranslated_messages(&new_content) {
+                    untranslated.push(format!("{}: {msg}", po_path.display()));
+                }
+            }
+
             if cli.check {
                 let old = existing_content.unwrap_or_default();
                 if old != new_content {
                     changed_files.push(po_path.display().to_string());
                 }
+            } else if cli.dry_run {
+                // Write nothing; --dry-run leaves the tree exactly as found.
             } else {
                 po::write_po_file(&po_path, &merged)?;
+                written.push(po_path.clone());
                 eprintln!("  Wrote {}", po_path.display());
             }
         }
@@ -436,6 +479,20 @@ fn main() -> Result<()> {
         elapsed.as_secs_f64()
     );
 
+    if cli.compile && !cli.check && !cli.dry_run {
+        compile_po_files(&written)?;
+    }
+
+    // Matches django-extended-makemessages' ordering: report untranslated
+    // messages before the --check verdict.
+    if cli.no_untranslated && !untranslated.is_empty() {
+        eprintln!("The following messages are untranslated:");
+        for m in &untranslated {
+            eprintln!("  {m}");
+        }
+        std::process::exit(1);
+    }
+
     if cli.check && !changed_files.is_empty() {
         eprintln!("The following .po files are out of sync:");
         for f in &changed_files {
@@ -445,6 +502,43 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Compile each .po to a sibling .mo, the way Django's `compilemessages` does
+/// (`msgfmt --check-format -o <mo> <po>`).
+fn compile_po_files(po_files: &[PathBuf]) -> Result<()> {
+    if po_files.is_empty() {
+        return Ok(());
+    }
+    if which("msgfmt").is_none() {
+        anyhow::bail!("--compile needs msgfmt on PATH (install GNU gettext)");
+    }
+    for po in po_files {
+        let mo = po.with_extension("mo");
+        let out = std::process::Command::new("msgfmt")
+            .arg("--check-format")
+            .arg("-o")
+            .arg(&mo)
+            .arg(po)
+            .output()
+            .with_context(|| format!("failed to run msgfmt for {}", po.display()))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "msgfmt failed for {}:\n{}",
+                po.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        eprintln!("  Compiled {}", mo.display());
+    }
+    Ok(())
+}
+
+fn which(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|p| p.is_file())
 }
 
 #[cfg(test)]
