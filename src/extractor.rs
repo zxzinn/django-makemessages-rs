@@ -1,3 +1,4 @@
+use crate::keywords::Keyword;
 use anyhow::Result;
 use fancy_regex::Regex as FancyRegex;
 use regex::Regex;
@@ -19,57 +20,16 @@ const TRANSLATOR_COMMENT_MARK: &str = "Translators";
 /// Single or double quoted string pattern fragment
 const SQ: &str = r#"'([^'\\]*(?:\\.[^'\\]*)*)'"#;
 const DQ: &str = r#""([^"\\]*(?:\\.[^"\\]*)*)""#;
-/// Triple-quoted forms, matched ahead of the single-quoted ones.
-const TSQ: &str = r#"'''([^\\]*?(?:\\.[^\\]*?)*?)'''"#;
-const TDQ: &str = r#""""([^\\]*?(?:\\.[^\\]*?)*?)""""#;
 
 fn str_pattern() -> String {
     format!("(?:{SQ}|{DQ})")
 }
 
-/// Python string literal including triple-quoted forms. Triple quotes come
-/// first so `"""x"""` is not mis-read as an empty `""` followed by `x`.
-fn py_str_pattern() -> String {
-    format!("(?s:(?:{TDQ}|{TSQ}|{DQ}|{SQ}))")
+/// Finds `name(` call sites for a keyword. The look-behind keeps `obj._()`
+/// and `some_func()` from matching a keyword named `_` or `func`.
+fn call_site_re(name: &str) -> FancyRegex {
+    FancyRegex::new(&format!(r"(?<![.\w]){}\s*\(", fancy_regex::escape(name))).unwrap()
 }
-
-fn concat_str_pattern() -> String {
-    let s = py_str_pattern();
-    format!(r"(?:{s}(?:[ \t\n\r\\]+{s})*)")
-}
-
-/// Uses fancy-regex for look-behind to avoid matching obj._() or some_func()
-static PYTHON_GETTEXT_RE: LazyLock<FancyRegex> = LazyLock::new(|| {
-    let cs = concat_str_pattern();
-    FancyRegex::new(&format!(
-        r"(?:(?:\b(?:gettext|gettext_lazy|gettext_noop))|(?:(?<![.\w])_))\(\s*{cs}\s*\)"
-    ))
-    .unwrap()
-});
-
-static PYTHON_NGETTEXT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    let cs = concat_str_pattern();
-    Regex::new(&format!(
-        r"\b(?:ngettext|ngettext_lazy)\(\s*{cs}\s*,\s*{cs}\s*,"
-    ))
-    .unwrap()
-});
-
-static PYTHON_PGETTEXT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    let cs = concat_str_pattern();
-    Regex::new(&format!(
-        r"\b(?:pgettext|pgettext_lazy)\(\s*{cs}\s*,\s*{cs}\s*\)"
-    ))
-    .unwrap()
-});
-
-static PYTHON_NPGETTEXT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    let cs = concat_str_pattern();
-    Regex::new(&format!(
-        r"\b(?:npgettext|npgettext_lazy)\(\s*{cs}\s*,\s*{cs}\s*,\s*{cs}\s*,"
-    ))
-    .unwrap()
-});
 
 /// `{% trans "msg" %}` / `{% translate "msg" ... context "ctx" %}`.
 /// Mirrors Django's inline_re: the message, optional ignored filters, then an
@@ -217,6 +177,62 @@ fn unescape_string(s: &str) -> String {
         .replace("\\\"", "\"")
 }
 
+/// Like `extract_concat_from_text`, but only when the argument is *nothing
+/// but* string literals (implicit concatenation allowed). An expression such
+/// as `getattr(obj, 'verbose_name', default)` must not contribute its inner
+/// literals as a msgid, which is what xgettext does too.
+fn extract_literal_argument(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            c if c.is_whitespace() => i += 1,
+            // A trailing backslash is a line continuation between literals.
+            '\\' => i += 1,
+            c @ ('\'' | '"') => {
+                let triple = i + 2 < chars.len() && chars[i + 1] == c && chars[i + 2] == c;
+                i += if triple { 3 } else { 1 };
+                let mut closed = false;
+                while i < chars.len() {
+                    if chars[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == c {
+                        if triple {
+                            if i + 2 < chars.len() && chars[i + 1] == c && chars[i + 2] == c {
+                                i += 3;
+                                closed = true;
+                                break;
+                            }
+                        } else {
+                            i += 1;
+                            closed = true;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                if !closed {
+                    return None;
+                }
+            }
+            // Anything else means this argument is an expression, not a literal.
+            _ => return None,
+        }
+    }
+    let value = extract_concat_from_text(trimmed);
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 fn extract_concat_from_text(text: &str) -> String {
     let mut result = String::new();
     let chars: Vec<char> = text.chars().collect();
@@ -309,6 +325,75 @@ fn split_args(text: &str) -> Vec<String> {
     args
 }
 
+/// Split the arguments of a call whose `(` ends at `open_end`, stopping at the
+/// matching `)`. Returns None if the call is unterminated.
+fn call_arguments(content: &str, open_end: usize) -> Option<Vec<String>> {
+    let rest = &content[open_end..];
+    let mut depth = 0i32;
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut triple = false;
+    let mut escape = false;
+    let bytes = rest.as_bytes();
+    let mut end = None;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if in_sq || in_dq {
+            if c == '\\' {
+                escape = true;
+            } else {
+                let q = if in_sq { '\'' } else { '"' };
+                if c == q {
+                    if triple {
+                        if rest[i..].starts_with(&q.to_string().repeat(3)) {
+                            in_sq = false;
+                            in_dq = false;
+                            triple = false;
+                            i += 3;
+                            continue;
+                        }
+                    } else {
+                        in_sq = false;
+                        in_dq = false;
+                    }
+                }
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                triple = rest[i..].starts_with(&c.to_string().repeat(3));
+                if c == '\'' {
+                    in_sq = true;
+                } else {
+                    in_dq = true;
+                }
+                i += if triple { 3 } else { 1 };
+                continue;
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => {
+                end = Some(i);
+                break;
+            }
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let end = end?;
+    Some(split_args(&rest[..end]))
+}
+
 fn line_num_at(content: &str, byte_offset: usize) -> usize {
     content[..byte_offset].matches('\n').count() + 1
 }
@@ -316,7 +401,16 @@ fn line_num_at(content: &str, byte_offset: usize) -> usize {
 /// Maps a 1-based line number to the `Translators:` comments that xgettext
 /// would attach to a string starting on that line: the run of `#` comment
 /// lines immediately above it, kept only if one starts with the mark.
-fn python_translator_comments(content: &str) -> std::collections::HashMap<usize, Vec<String>> {
+/// A comment is emitted when it starts with one of the configured tags.
+/// An empty tag matches everything, which is xgettext's bare `--add-comments`.
+fn comment_matches(text: &str, tags: &[String]) -> bool {
+    tags.iter().any(|t| t.is_empty() || text.starts_with(t))
+}
+
+fn python_translator_comments(
+    content: &str,
+    tags: &[String],
+) -> std::collections::HashMap<usize, Vec<String>> {
     let lines: Vec<&str> = content.lines().collect();
     let mut map = std::collections::HashMap::new();
 
@@ -336,10 +430,7 @@ fn python_translator_comments(content: &str) -> std::collections::HashMap<usize,
             continue;
         }
         block.reverse();
-        if let Some(pos) = block
-            .iter()
-            .position(|l| l.starts_with(TRANSLATOR_COMMENT_MARK))
-        {
+        if let Some(pos) = block.iter().position(|l| comment_matches(l, tags)) {
             map.insert(idx + 1, block[pos..].to_vec());
         }
     }
@@ -348,7 +439,10 @@ fn python_translator_comments(content: &str) -> std::collections::HashMap<usize,
 
 /// `{# Translators: ... #}` and `{% comment %}` blocks, keyed by the line the
 /// following template tag starts on.
-fn template_translator_comments(content: &str) -> std::collections::HashMap<usize, Vec<String>> {
+fn template_translator_comments(
+    content: &str,
+    tags: &[String],
+) -> std::collections::HashMap<usize, Vec<String>> {
     let mut map: std::collections::HashMap<usize, Vec<String>> = std::collections::HashMap::new();
 
     for caps in TEMPLATE_INLINE_COMMENT_RE.captures_iter(content) {
@@ -358,7 +452,7 @@ fn template_translator_comments(content: &str) -> std::collections::HashMap<usiz
             .trim_start_matches("{#")
             .trim_end_matches("#}")
             .trim();
-        if inner.starts_with(TRANSLATOR_COMMENT_MARK) {
+        if comment_matches(inner, tags) {
             let line = line_num_at(content, m.start());
             map.entry(line + 1).or_default().push(inner.to_string());
         }
@@ -375,7 +469,7 @@ fn template_translator_comments(content: &str) -> std::collections::HashMap<usiz
         let inner_lines: Vec<&str> = body[inner_start..inner_end].lines().collect();
         if let Some(pos) = inner_lines
             .iter()
-            .rposition(|l| l.trim_start().starts_with(TRANSLATOR_COMMENT_MARK))
+            .rposition(|l| comment_matches(l.trim_start(), tags))
         {
             let collected: Vec<String> = inner_lines[pos..]
                 .iter()
@@ -392,106 +486,69 @@ fn template_translator_comments(content: &str) -> std::collections::HashMap<usiz
     map
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_from_python(content: &str, file_path: &Path) -> Vec<TranslationEntry> {
-    // Same per-pattern pass structure as templates; sort back to source order.
+    extract_from_python_with(
+        content,
+        file_path,
+        &crate::keywords::default_keywords(false),
+        &[TRANSLATOR_COMMENT_MARK.to_string()],
+    )
+}
+
+/// Scan Python/JS source for each keyword's call sites and pull the msgid,
+/// plural and context out of the argument positions its spec declares.
+pub fn extract_from_python_with(
+    content: &str,
+    file_path: &Path,
+    keywords: &[Keyword],
+    comment_tags: &[String],
+) -> Vec<TranslationEntry> {
     let mut entries: Vec<(usize, TranslationEntry)> = Vec::new();
-    let comment_map = python_translator_comments(content);
+    let comment_map = python_translator_comments(content, comment_tags);
     let file_ref = file_path.to_string_lossy().to_string();
 
-    for m in PYTHON_GETTEXT_RE.find_iter(content) {
-        let m = match m {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        let line_num = line_num_at(content, m.start());
-        let matched = m.as_str();
-        let paren_start = matched.find('(').unwrap();
-        let inner = &matched[paren_start + 1..matched.len() - 1].trim();
-        let msgid = extract_concat_from_text(inner);
-        if !msgid.is_empty() {
+    for keyword in keywords {
+        let re = call_site_re(&keyword.name);
+        for m in re.find_iter(content) {
+            let m = match m {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let args = match call_arguments(content, m.end()) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            let pick = |n: usize| -> Option<String> {
+                extract_literal_argument(args.get(n.checked_sub(1)?)?)
+            };
+
+            let msgid = match pick(keyword.msgid) {
+                Some(v) => v,
+                None => continue,
+            };
+            let plural = keyword.plural.and_then(pick);
+            // A spec asking for a plural that is absent is not a match.
+            if keyword.plural.is_some() && plural.is_none() {
+                continue;
+            }
+            let msgctxt = keyword.context.and_then(pick);
+            if keyword.context.is_some() && msgctxt.is_none() {
+                continue;
+            }
+
+            let line_num = line_num_at(content, m.start());
             entries.push((
                 m.start(),
                 TranslationEntry {
                     msgid,
-                    msgid_plural: None,
-                    msgctxt: None,
+                    msgid_plural: plural,
+                    msgctxt,
                     references: vec![format!("{file_ref}:{line_num}")],
                     comments: comment_map.get(&line_num).cloned().unwrap_or_default(),
                 },
             ));
-        }
-    }
-
-    for m in PYTHON_NGETTEXT_RE.find_iter(content) {
-        let line_num = line_num_at(content, m.start());
-        let matched = m.as_str();
-        let paren_start = matched.find('(').unwrap();
-        let inner = &matched[paren_start + 1..];
-        let args = split_args(inner);
-        if args.len() >= 2 {
-            let singular = extract_concat_from_text(&args[0]);
-            let plural = extract_concat_from_text(&args[1]);
-            if !singular.is_empty() && !plural.is_empty() {
-                entries.push((
-                    m.start(),
-                    TranslationEntry {
-                        msgid: singular,
-                        msgid_plural: Some(plural),
-                        msgctxt: None,
-                        references: vec![format!("{file_ref}:{line_num}")],
-                        comments: comment_map.get(&line_num).cloned().unwrap_or_default(),
-                    },
-                ));
-            }
-        }
-    }
-
-    for m in PYTHON_PGETTEXT_RE.find_iter(content) {
-        let line_num = line_num_at(content, m.start());
-        let matched = m.as_str();
-        let paren_start = matched.find('(').unwrap();
-        let inner = &matched[paren_start + 1..matched.len() - 1];
-        let args = split_args(inner);
-        if args.len() >= 2 {
-            let context = extract_concat_from_text(&args[0]);
-            let msgid = extract_concat_from_text(&args[1]);
-            if !msgid.is_empty() {
-                entries.push((
-                    m.start(),
-                    TranslationEntry {
-                        msgid,
-                        msgid_plural: None,
-                        msgctxt: Some(context),
-                        references: vec![format!("{file_ref}:{line_num}")],
-                        comments: comment_map.get(&line_num).cloned().unwrap_or_default(),
-                    },
-                ));
-            }
-        }
-    }
-
-    for m in PYTHON_NPGETTEXT_RE.find_iter(content) {
-        let line_num = line_num_at(content, m.start());
-        let matched = m.as_str();
-        let paren_start = matched.find('(').unwrap();
-        let inner = &matched[paren_start + 1..];
-        let args = split_args(inner);
-        if args.len() >= 3 {
-            let context = extract_concat_from_text(&args[0]);
-            let singular = extract_concat_from_text(&args[1]);
-            let plural = extract_concat_from_text(&args[2]);
-            if !singular.is_empty() && !plural.is_empty() {
-                entries.push((
-                    m.start(),
-                    TranslationEntry {
-                        msgid: singular,
-                        msgid_plural: Some(plural),
-                        msgctxt: Some(context),
-                        references: vec![format!("{file_ref}:{line_num}")],
-                        comments: comment_map.get(&line_num).cloned().unwrap_or_default(),
-                    },
-                ));
-            }
         }
     }
 
@@ -542,9 +599,18 @@ fn block_context(args: &str) -> Option<String> {
         .map(|m| unescape_string(m.as_str()))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_from_template(content: &str, file_path: &Path) -> Vec<TranslationEntry> {
+    extract_from_template_with(content, file_path, &[TRANSLATOR_COMMENT_MARK.to_string()])
+}
+
+pub fn extract_from_template_with(
+    content: &str,
+    file_path: &Path,
+    comment_tags: &[String],
+) -> Vec<TranslationEntry> {
     // Collect translator comments before blanking comment regions out.
-    let comment_map = template_translator_comments(content);
+    let comment_map = template_translator_comments(content, comment_tags);
     let content = &strip_template_comments(content);
     // Each pattern is scanned in its own pass, so keep the source offset and
     // sort at the end to restore document order (what Django's lexer emits).
@@ -672,15 +738,52 @@ pub fn extract_from_template(content: &str, file_path: &Path) -> Vec<Translation
     entries.into_iter().map(|(_, e)| e).collect()
 }
 
+/// Per-run extraction settings shared by every file.
+pub struct ExtractOptions {
+    pub keywords: Vec<Keyword>,
+    /// Comment tags to emit as `#.` lines. An empty tag means "any comment".
+    pub comment_tags: Vec<String>,
+    /// Add `import x as y` aliases from each file to that file's keywords.
+    pub detect_aliases: bool,
+}
+
+impl Default for ExtractOptions {
+    fn default() -> Self {
+        Self {
+            keywords: crate::keywords::default_keywords(false),
+            comment_tags: vec![TRANSLATOR_COMMENT_MARK.to_string()],
+            detect_aliases: false,
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_file(file_path: &Path) -> Result<Vec<TranslationEntry>> {
+    extract_file_with(file_path, &ExtractOptions::default())
+}
+
+pub fn extract_file_with(
+    file_path: &Path,
+    options: &ExtractOptions,
+) -> Result<Vec<TranslationEntry>> {
     let content = std::fs::read_to_string(file_path)?;
     let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     // JavaScript uses the same gettext call syntax and quoting as Python, so
     // the Python scanner handles it; only templates need the tag lexer.
     let entries = match ext {
-        "py" | "js" | "mjs" | "cjs" | "ts" => extract_from_python(&content, file_path),
-        _ => extract_from_template(&content, file_path),
+        "py" | "js" | "mjs" | "cjs" | "ts" => {
+            let mut keywords = options.keywords.clone();
+            if options.detect_aliases {
+                for k in crate::keywords::detect_aliases(&content) {
+                    if !keywords.iter().any(|e| e.name == k.name) {
+                        keywords.push(k);
+                    }
+                }
+            }
+            extract_from_python_with(&content, file_path, &keywords, &options.comment_tags)
+        }
+        _ => extract_from_template_with(&content, file_path, &options.comment_tags),
     };
 
     Ok(entries)
@@ -1096,5 +1199,47 @@ skip this
         let html = "{% blocktranslate trimmed %}\n   a   {{ x }}\n   b\n{% endblocktranslate %}";
         let entries = extract_from_template(html, &PathBuf::from("test.html"));
         assert_eq!(entries[0].msgid, "a   %(x)s b");
+    }
+
+    #[test]
+    fn test_expression_argument_is_not_a_msgid() {
+        // Regression: `_(getattr(obj, 'verbose_name', label))` used to leak
+        // the inner literal as a msgid. xgettext extracts nothing here.
+        let code = "x = _(getattr(model._meta, 'verbose_name', label))";
+        assert!(extract_from_python(code, &PathBuf::from("t.py")).is_empty());
+    }
+
+    #[test]
+    fn test_bare_variable_argument_ignored() {
+        assert!(extract_from_python("x = _(some_var)", &PathBuf::from("t.py")).is_empty());
+    }
+
+    #[test]
+    fn test_nested_call_argument_ignored() {
+        assert!(extract_from_python("x = _(fn('nested'))", &PathBuf::from("t.py")).is_empty());
+    }
+
+    #[test]
+    fn test_literal_concat_still_extracted() {
+        let e = extract_from_python("x = _('a' 'b')", &PathBuf::from("t.py"));
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].msgid, "ab");
+    }
+
+    #[test]
+    fn test_custom_keyword_extracted() {
+        let kws = vec![crate::keywords::Keyword::parse("mytrans").unwrap()];
+        let e = extract_from_python_with("mytrans(\"hi\")", &PathBuf::from("t.py"), &kws, &[]);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].msgid, "hi");
+    }
+
+    #[test]
+    fn test_custom_keyword_with_context_argnums() {
+        let kws = vec![crate::keywords::Keyword::parse("myctx:1c,2").unwrap()];
+        let e = extract_from_python_with("myctx('c', 'm')", &PathBuf::from("t.py"), &kws, &[]);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].msgctxt.as_deref(), Some("c"));
+        assert_eq!(e[0].msgid, "m");
     }
 }
