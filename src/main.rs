@@ -79,8 +79,8 @@ struct Cli {
     #[arg(short = 'd', long, default_value = "django")]
     domain: String,
 
-    /// File extensions to examine
-    #[arg(short = 'e', long = "extension", default_values_t = vec!["html".to_string(), "txt".to_string(), "py".to_string()])]
+    /// File extensions to examine [default: html,txt,py; js for djangojs]
+    #[arg(short = 'e', long = "extension")]
     extensions: Vec<String>,
 
     /// Show timing information
@@ -102,20 +102,25 @@ fn main() -> Result<()> {
     eprintln!("Scanning files in {}...", root.display());
     let file_start = Instant::now();
 
+    // Django defaults extensions by domain: js for djangojs, html/txt/py else.
+    let extensions = if !cli.extensions.is_empty() {
+        cli.extensions.clone()
+    } else if cli.domain == "djangojs" {
+        vec!["js".to_string()]
+    } else {
+        vec!["html".to_string(), "txt".to_string(), "py".to_string()]
+    };
+
     let file_walker = walker::FileWalker::new(
         root.clone(),
-        cli.extensions.clone(),
+        extensions.clone(),
         cli.ignore_patterns.clone(),
     );
     let files = file_walker.walk()?;
     let file_count = files.len();
 
     if cli.timing {
-        eprintln!(
-            "  Found {} files in {:?}",
-            file_count,
-            file_start.elapsed()
-        );
+        eprintln!("  Found {} files in {:?}", file_count, file_start.elapsed());
     }
 
     eprintln!("Extracting translation strings...");
@@ -132,7 +137,10 @@ fn main() -> Result<()> {
                             .references
                             .iter()
                             .map(|r| {
-                                r.replace(&file.to_string_lossy().to_string(), &rel_path.to_string_lossy().to_string())
+                                r.replace(
+                                    &file.to_string_lossy().to_string(),
+                                    &rel_path.to_string_lossy().to_string(),
+                                )
                             })
                             .collect();
                     }
@@ -193,12 +201,7 @@ fn main() -> Result<()> {
             None
         };
 
-        let merged = po::merge_entries(
-            &all_entries,
-            existing_content.as_deref(),
-            locale,
-            &options,
-        );
+        let merged = po::merge_entries(&all_entries, existing_content.as_deref(), locale, &options);
 
         let new_content = format!("{merged}\n");
 

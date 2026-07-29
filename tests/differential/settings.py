@@ -1,0 +1,4 @@
+SECRET_KEY = "x"
+INSTALLED_APPS = []
+USE_I18N = True
+DATABASES = {}

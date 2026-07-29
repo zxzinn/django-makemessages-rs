@@ -1,0 +1,3 @@
+{% load i18n %}
+{% blocktrans count counter=list|length %}{{ counter }} item{% plural %}{{ counter }} items{% endblocktrans %}
+{% blocktranslate count n=items|length context "cart" %}{{ n }} thing{% plural %}{{ n }} things{% endblocktranslate %}

@@ -6,9 +6,8 @@ use std::fmt::Write as FmtWrite;
 use std::path::Path;
 use std::sync::LazyLock;
 
-static PO_HEADER_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?ms)^msgid\s+""\nmsgstr\s+"[^"]*"(?:\n\s*"[^"]*")*"#).unwrap()
-});
+static PO_HEADER_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?ms)^msgid\s+""\nmsgstr\s+"[^"]*"(?:\n\s*"[^"]*")*"#).unwrap());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LocationMode {
@@ -27,6 +26,8 @@ pub(crate) struct PoEntry {
     msgid: String,
     msgid_plural: Option<String>,
     msgstr: Vec<String>,
+    /// Entry no longer present in the source, written back as `#~` lines.
+    obsolete: bool,
 }
 
 fn entry_key(msgctxt: &Option<String>, msgid: &str) -> String {
@@ -79,13 +80,35 @@ fn parse_po_string(raw: &str) -> String {
 pub(crate) fn parse_po_file(content: &str) -> IndexMap<String, PoEntry> {
     let mut entries = IndexMap::new();
 
-    let lines: Vec<&str> = content.lines().collect();
+    // Obsolete blocks are ordinary entries behind a `#~` prefix; unwrap them
+    // so the main loop can parse them, and remember which lines were marked.
+    let raw_lines: Vec<&str> = content.lines().collect();
+    let mut obsolete_flags = Vec::with_capacity(raw_lines.len());
+    let unwrapped: Vec<String> = raw_lines
+        .iter()
+        .map(|l| {
+            let t = l.trim_start();
+            if let Some(rest) = t.strip_prefix("#~") {
+                obsolete_flags.push(true);
+                rest.trim_start().to_string()
+            } else {
+                obsolete_flags.push(false);
+                (*l).to_string()
+            }
+        })
+        .collect();
+    let lines: Vec<&str> = unwrapped.iter().map(|s| s.as_str()).collect();
     let mut i = 0;
 
     while i < lines.len() {
         let line = lines[i].trim();
 
-        if line.is_empty() || (line.starts_with('#') && !line.starts_with("#:") && !line.starts_with("#,") && !line.starts_with("#.")) {
+        if line.is_empty()
+            || (line.starts_with('#')
+                && !line.starts_with("#:")
+                && !line.starts_with("#,")
+                && !line.starts_with("#."))
+        {
             if line.starts_with('#') {
                 i += 1;
                 continue;
@@ -94,6 +117,7 @@ pub(crate) fn parse_po_file(content: &str) -> IndexMap<String, PoEntry> {
             continue;
         }
 
+        let entry_start = i;
         let mut comments = Vec::new();
         let mut references = Vec::new();
         let mut flags = Vec::new();
@@ -127,7 +151,11 @@ pub(crate) fn parse_po_file(content: &str) -> IndexMap<String, PoEntry> {
 
         let mut msgctxt = None;
         if i < lines.len() && lines[i].trim().starts_with("msgctxt ") {
-            let mut raw = lines[i].trim().strip_prefix("msgctxt ").unwrap_or("").to_string();
+            let mut raw = lines[i]
+                .trim()
+                .strip_prefix("msgctxt ")
+                .unwrap_or("")
+                .to_string();
             i += 1;
             while i < lines.len() && lines[i].trim().starts_with('"') {
                 raw.push('\n');
@@ -142,10 +170,22 @@ pub(crate) fn parse_po_file(content: &str) -> IndexMap<String, PoEntry> {
             continue;
         }
 
-        let mut msgid_raw = lines[i].trim().strip_prefix("msgid ").unwrap_or("").to_string();
+        let mut msgid_raw = lines[i]
+            .trim()
+            .strip_prefix("msgid ")
+            .unwrap_or("")
+            .to_string();
         i += 1;
-        while i < lines.len() && lines[i].trim().starts_with('"') && !lines[i].trim().starts_with("\"\"") || (i < lines.len() && lines[i].trim().starts_with('"') && !lines[i].trim().starts_with("msgid_plural") && !lines[i].trim().starts_with("msgstr")) {
-            if lines[i].trim().starts_with("msgid_plural") || lines[i].trim().starts_with("msgstr") {
+        while i < lines.len()
+            && lines[i].trim().starts_with('"')
+            && !lines[i].trim().starts_with("\"\"")
+            || (i < lines.len()
+                && lines[i].trim().starts_with('"')
+                && !lines[i].trim().starts_with("msgid_plural")
+                && !lines[i].trim().starts_with("msgstr"))
+        {
+            if lines[i].trim().starts_with("msgid_plural") || lines[i].trim().starts_with("msgstr")
+            {
                 break;
             }
             msgid_raw.push('\n');
@@ -162,7 +202,10 @@ pub(crate) fn parse_po_file(content: &str) -> IndexMap<String, PoEntry> {
                 .unwrap_or("")
                 .to_string();
             i += 1;
-            while i < lines.len() && lines[i].trim().starts_with('"') && !lines[i].trim().starts_with("msgstr") {
+            while i < lines.len()
+                && lines[i].trim().starts_with('"')
+                && !lines[i].trim().starts_with("msgstr")
+            {
                 raw.push('\n');
                 raw.push_str(lines[i].trim());
                 i += 1;
@@ -222,6 +265,7 @@ pub(crate) fn parse_po_file(content: &str) -> IndexMap<String, PoEntry> {
                 msgid,
                 msgid_plural,
                 msgstr: msgstr_list,
+                obsolete: obsolete_flags.get(entry_start).copied().unwrap_or(false),
             },
         );
     }
@@ -229,19 +273,29 @@ pub(crate) fn parse_po_file(content: &str) -> IndexMap<String, PoEntry> {
     entries
 }
 
-fn format_entry(entry: &PoEntry, location_mode: LocationMode, no_flags: bool, sort_output: bool, no_wrap: bool) -> String {
+fn format_entry(
+    entry: &PoEntry,
+    location_mode: LocationMode,
+    no_flags: bool,
+    sort_output: bool,
+    no_wrap: bool,
+) -> String {
     let mut lines = Vec::new();
 
     for comment in &entry.comments {
         lines.push(comment.clone());
     }
 
-    if location_mode != LocationMode::Never && !entry.references.is_empty() {
+    if location_mode != LocationMode::Never && !entry.references.is_empty() && !entry.obsolete {
         let mut refs = entry.references.clone();
         if location_mode == LocationMode::File {
             refs = refs
                 .iter()
-                .map(|r| r.rsplit_once(':').map_or(r.as_str(), |(file, _)| file).to_string())
+                .map(|r| {
+                    r.rsplit_once(':')
+                        .map_or(r.as_str(), |(file, _)| file)
+                        .to_string()
+                })
                 .collect();
             refs.dedup();
         }
@@ -284,12 +338,21 @@ fn format_entry(entry: &PoEntry, location_mode: LocationMode, no_flags: bool, so
         lines.push(format_po_string("msgstr", msgstr));
     }
 
+    if entry.obsolete {
+        // gettext marks every line of a commented-out entry, continuations too.
+        return lines
+            .iter()
+            .flat_map(|l| l.lines())
+            .map(|l| format!("#~ {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
     lines.join("\n")
 }
 
 pub struct PoFileOptions {
     pub location_mode: LocationMode,
-    #[allow(dead_code)]
     pub no_obsolete: bool,
     pub no_wrap: bool,
     pub sort_output: bool,
@@ -297,6 +360,10 @@ pub struct PoFileOptions {
     pub no_fuzzy_matching: bool,
     pub no_flags: bool,
     pub keep_header: bool,
+}
+
+fn extracted_comments(entry: &TranslationEntry) -> Vec<String> {
+    entry.comments.iter().map(|c| format!("#. {c}")).collect()
 }
 
 pub fn merge_entries(
@@ -333,16 +400,24 @@ pub fn merge_entries(
 
         if let Some(existing) = new_entries.get_mut(&key) {
             existing.references.extend(entry.references.clone());
+            for c in extracted_comments(entry) {
+                if !existing.comments.contains(&c) {
+                    existing.comments.push(c);
+                }
+            }
         } else if let Some(existing) = existing_entries.get(&key) {
             let mut merged = existing.clone();
             merged.references = entry.references.clone();
             merged.flags.retain(|f| f != "fuzzy");
+            // Comments are re-derived from source every run, so replace rather
+            // than keep whatever the previous run left behind.
+            merged.comments = extracted_comments(entry);
             new_entries.insert(key, merged);
         } else {
             new_entries.insert(
                 key,
                 PoEntry {
-                    comments: Vec::new(),
+                    comments: extracted_comments(entry),
                     references: entry.references.clone(),
                     flags: Vec::new(),
                     msgctxt: entry.msgctxt.clone(),
@@ -353,6 +428,7 @@ pub fn merge_entries(
                     } else {
                         vec![String::new()]
                     },
+                    obsolete: false,
                 },
             );
         }
@@ -360,6 +436,30 @@ pub fn merge_entries(
 
     if options.sort_output {
         new_entries.sort_keys();
+    }
+
+    // Entries that vanished from the source are kept as `#~` blocks so the
+    // translations survive, unless --no-obsolete asks for them to be dropped.
+    let mut obsolete_entries: Vec<PoEntry> = Vec::new();
+    if !options.no_obsolete {
+        for (key, existing) in &existing_entries {
+            if new_entries.contains_key(key) {
+                continue;
+            }
+            // A previously-obsolete entry with no translation is dead weight.
+            if existing.msgstr.iter().all(|s| s.is_empty()) {
+                continue;
+            }
+            let mut e = existing.clone();
+            e.obsolete = true;
+            e.references.clear();
+            obsolete_entries.push(e);
+        }
+        if options.sort_output {
+            obsolete_entries.sort_by(|a, b| {
+                entry_key(&a.msgctxt, &a.msgid).cmp(&entry_key(&b.msgctxt, &b.msgid))
+            });
+        }
     }
 
     let header = if let Some(h) = existing_header_with_comments {
@@ -373,7 +473,24 @@ pub fn merge_entries(
     output.push_str("\n\n");
 
     for (_, entry) in &new_entries {
-        output.push_str(&format_entry(entry, options.location_mode, options.no_flags, options.sort_output, options.no_wrap));
+        output.push_str(&format_entry(
+            entry,
+            options.location_mode,
+            options.no_flags,
+            options.sort_output,
+            options.no_wrap,
+        ));
+        output.push_str("\n\n");
+    }
+
+    for entry in &obsolete_entries {
+        output.push_str(&format_entry(
+            entry,
+            options.location_mode,
+            options.no_flags,
+            options.sort_output,
+            options.no_wrap,
+        ));
         output.push_str("\n\n");
     }
 
@@ -446,6 +563,7 @@ msgstr "你好"
             msgid_plural: None,
             msgctxt: None,
             references: vec!["new.py:5".to_string()],
+            comments: Vec::new(),
         }];
         let options = PoFileOptions {
             location_mode: LocationMode::Full,
@@ -476,6 +594,7 @@ msgstr "你好"
             msgid: "x".to_string(),
             msgid_plural: None,
             msgstr: vec![String::new()],
+            obsolete: false,
         }
     }
 
@@ -493,8 +612,14 @@ msgstr "你好"
         // "#: " (3) + "aaaa.py:1" (9) repeated. After 7 refs separated by spaces:
         // 2 + (1+9)*7 = 72; adding an 8th: 72 + 1 + 9 = 82 >= 80 -> wrap.
         let refs: Vec<&str> = vec![
-            "aaaa.py:1", "aaaa.py:2", "aaaa.py:3", "aaaa.py:4",
-            "aaaa.py:5", "aaaa.py:6", "aaaa.py:7", "aaaa.py:8",
+            "aaaa.py:1",
+            "aaaa.py:2",
+            "aaaa.py:3",
+            "aaaa.py:4",
+            "aaaa.py:5",
+            "aaaa.py:6",
+            "aaaa.py:7",
+            "aaaa.py:8",
         ];
         let entry = make_entry(refs);
         let out = format_entry(&entry, LocationMode::Full, false, false, false);
@@ -526,8 +651,14 @@ msgstr "你好"
     #[test]
     fn test_no_wrap_keeps_single_line() {
         let refs: Vec<&str> = vec![
-            "aaaa.py:1", "aaaa.py:2", "aaaa.py:3", "aaaa.py:4",
-            "aaaa.py:5", "aaaa.py:6", "aaaa.py:7", "aaaa.py:8",
+            "aaaa.py:1",
+            "aaaa.py:2",
+            "aaaa.py:3",
+            "aaaa.py:4",
+            "aaaa.py:5",
+            "aaaa.py:6",
+            "aaaa.py:7",
+            "aaaa.py:8",
         ];
         let entry = make_entry(refs);
         let out = format_entry(&entry, LocationMode::Full, false, false, true);
@@ -549,5 +680,90 @@ msgstr "你好"
         let entry = make_entry(vec!["a.py:1"]);
         let out = format_entry(&entry, LocationMode::Never, false, false, true);
         assert!(!out.lines().any(|l| l.starts_with("#:")));
+    }
+
+    fn opts(no_obsolete: bool) -> PoFileOptions {
+        PoFileOptions {
+            location_mode: LocationMode::Never,
+            no_obsolete,
+            no_wrap: true,
+            sort_output: true,
+            no_fuzzy_matching: true,
+            no_flags: false,
+            keep_header: true,
+        }
+    }
+
+    fn entry(msgid: &str) -> TranslationEntry {
+        TranslationEntry {
+            msgid: msgid.to_string(),
+            msgid_plural: None,
+            msgctxt: None,
+            references: vec!["a.py:1".to_string()],
+            comments: Vec::new(),
+        }
+    }
+
+    const EXISTING: &str = r#"msgid ""
+msgstr ""
+"Language: en\n"
+
+msgid "Kept"
+msgstr "translated kept"
+
+msgid "Gone"
+msgstr "precious translation"
+"#;
+
+    #[test]
+    fn test_obsolete_entry_is_preserved() {
+        let out = merge_entries(&[entry("Kept")], Some(EXISTING), "en", &opts(false));
+        assert!(
+            out.contains(r#"#~ msgid "Gone""#),
+            "missing obsolete block:\n{out}"
+        );
+        assert!(out.contains(r#"#~ msgstr "precious translation""#));
+        assert!(out.contains(r#"msgid "Kept""#));
+    }
+
+    #[test]
+    fn test_no_obsolete_drops_entry() {
+        let out = merge_entries(&[entry("Kept")], Some(EXISTING), "en", &opts(true));
+        assert!(
+            !out.contains("Gone"),
+            "obsolete entry should be gone:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_untranslated_obsolete_is_not_kept() {
+        let existing = "msgid \"\"\nmsgstr \"\"\n\nmsgid \"Gone\"\nmsgstr \"\"\n";
+        let out = merge_entries(&[entry("Kept")], Some(existing), "en", &opts(false));
+        assert!(!out.contains("Gone"));
+    }
+
+    #[test]
+    fn test_obsolete_survives_round_trip() {
+        let first = merge_entries(&[entry("Kept")], Some(EXISTING), "en", &opts(false));
+        let second = merge_entries(&[entry("Kept")], Some(&first), "en", &opts(false));
+        assert_eq!(second.matches(r#"#~ msgid "Gone""#).count(), 1, "{second}");
+    }
+
+    #[test]
+    fn test_obsolete_entry_has_no_location_line() {
+        let out = merge_entries(&[entry("Kept")], Some(EXISTING), "en", &{
+            let mut o = opts(false);
+            o.location_mode = LocationMode::Full;
+            o
+        });
+        assert!(!out.contains("#~ #:"));
+    }
+
+    #[test]
+    fn test_translator_comment_emitted() {
+        let mut e = entry("Hi");
+        e.comments = vec!["Translators: a hint".to_string()];
+        let out = merge_entries(&[e], None, "en", &opts(false));
+        assert!(out.contains("#. Translators: a hint"), "{out}");
     }
 }
