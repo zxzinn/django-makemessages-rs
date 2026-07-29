@@ -5,6 +5,7 @@ use regex::Regex;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static PO_HEADER_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?ms)^msgid\s+""\nmsgstr\s+"[^"]*"(?:\n\s*"[^"]*")*"#).unwrap());
@@ -498,12 +499,22 @@ pub fn merge_entries(
 }
 
 fn generate_header(locale: &str) -> String {
+    // Django copies the locale's Plural-Forms out of its own shipped catalog
+    // whenever it creates a .po; the baked-in table stands in for that.
+    let plural_forms = crate::plural_forms::plural_forms_for(locale);
+    let created = pot_creation_date();
     format!(
-        r#"msgid ""
+        r#"# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2024-01-01 00:00+0000\n"
+"POT-Creation-Date: {created}\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -511,8 +522,37 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=2; plural=(n != 1);\n""#
+"Plural-Forms: {plural_forms}\n""#
     )
+}
+
+/// `POT-Creation-Date` in xgettext's format, e.g. `2026-07-29 04:34+0000`.
+/// Written in UTC: this only ever lands in a freshly created .po (existing
+/// files keep their own header), so there is nothing to churn.
+fn pot_creation_date() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (y, mo, d, h, mi) = civil_from_unix(now);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}+0000")
+}
+
+/// Days-to-civil conversion (Howard Hinnant's algorithm).
+fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d, (rem / 3600) as u32, (rem % 3600 / 60) as u32)
 }
 
 pub fn write_po_file(path: &Path, content: &str) -> Result<()> {

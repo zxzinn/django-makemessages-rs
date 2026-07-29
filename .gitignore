@@ -1,5 +1,7 @@
 target/
 .idea/
-locale/
+# Generated when running the tool at the repo root, but fixtures need theirs.
+/locale/
+!tests/differential/fixtures/**/locale/
 uv.lock
 tests/differential/.venv

@@ -47,27 +47,37 @@ for name in "${names[@]}"; do
     fixture="$FIXTURES/$name"
     [ -d "$fixture" ] || { echo "SKIP   $name (no such fixture)"; continue; }
 
-    # The djangojs domain is selected by fixture name.
+    # A fixture may carry an `options` file with extra flags for our binary,
+    # and a `domain` file to select the gettext domain.
     domain=django
-    [ "$name" = "jsdomain" ] && domain=djangojs
+    [ -f "$fixture/domain" ] && domain=$(cat "$fixture/domain")
+    rs_extra=""
+    [ -f "$fixture/options" ] && rs_extra=$(cat "$fixture/options")
 
     work=$(mktemp -d)
 
     mkdir -p "$work/dj" "$work/rs"
     cp -R "$fixture"/. "$work/dj"/
     cp -R "$fixture"/. "$work/rs"/
+    rm -f "$work/dj/options" "$work/dj/domain" "$work/rs/options" "$work/rs/domain"
     cp "$HERE/settings.py" "$HERE/manage.py" "$work/dj"/
     mkdir -p "$work/dj/locale" "$work/rs/locale"
 
     (cd "$work/dj" && DJANGO_SETTINGS_MODULE=settings "$PYTHON" manage.py makemessages \
         -d "$domain" -l en --no-obsolete -i settings.py -i manage.py) >/dev/null 2>&1
-    (cd "$work/rs" && "$RS_BIN" -d "$domain" -l en --locale-dir locale) >/dev/null 2>&1
+    # shellcheck disable=SC2086
+    (cd "$work/rs" && "$RS_BIN" -d "$domain" -l en --locale-dir locale $rs_extra) >/dev/null 2>&1
 
-    dj_po="$work/dj/locale/en/LC_MESSAGES/$domain.po"
-    rs_po="$work/rs/locale/en/LC_MESSAGES/$domain.po"
-
-    "$PYTHON" "$HERE/normalize.py" "$dj_po" > "$work/dj.txt" 2>/dev/null
-    "$PYTHON" "$HERE/normalize.py" "$rs_po" > "$work/rs.txt" 2>/dev/null
+    # Compare every .po produced, keyed by path relative to the tree root, so
+    # per-app locale dirs are covered too.
+    collect() {
+        (cd "$1" && find . -name '*.po' | sort | while read -r po; do
+            echo "### $po"
+            "$PYTHON" "$HERE/normalize.py" "$po"
+        done)
+    }
+    collect "$work/dj" > "$work/dj.txt" 2>/dev/null
+    collect "$work/rs" > "$work/rs.txt" 2>/dev/null
 
     if diff -u --label django --label rust "$work/dj.txt" "$work/rs.txt" > "$work/diff.txt"; then
         echo "ok     $name"
