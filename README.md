@@ -182,6 +182,12 @@ uv run django-makemessages-rs \
 cargo test --release
 ```
 
+This runs the unit tests plus `tests/cli.rs`, an end-to-end suite that drives
+the built binary over throwaway project trees to cover exit codes and
+file-creation behavior that unit tests cannot reach (`--check`,
+`--no-untranslated`, `--dry-run`, `--compile`, `--force-po`, `--all`,
+`--exclude`, `--per-app-locale`, and the default ignore patterns).
+
 There is also a differential suite that runs the real Django `makemessages`
 over the same fixtures and compares the extracted messages, so behavioral
 drift from Django gets caught:
